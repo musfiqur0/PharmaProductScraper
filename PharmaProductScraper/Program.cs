@@ -1,12 +1,14 @@
+using PharmaProductScraper.Models;
 using PharmaProductScraper.Repositories;
 using PharmaProductScraper.Scrapers;
 
 var connectionString = "Host=localhost;Port=5432;Database=dg_pharma;Username=postgres;Password=postgrespass123;";
+var connectionStringLive= "Host=localhost;Port=5432;Database=dg_pharma;Username=postgres;Password=postgrespass123;";
 
 var delayMilliseconds = 1500;
 var take = 100;
 
-var repository = new ProductRepository(connectionString);
+var repository = new ProductRepository(connectionString, connectionStringLive);
 
 using var httpClient = new HttpClient
 {
@@ -37,13 +39,13 @@ foreach (var product in products)
 
     try
     {
-        var result = await aroggaScraper.SearchAsync(product.Name);
+        //var result = await aroggaScraper.SearchAsync(product);
+        ScrapedProduct? result = null;
 
         if (result is null)
         {
             Console.WriteLine("Arogga: Not found. Trying MedEx...");
-
-            result = await medexScraper.SearchAsync(product.Name);
+            result = await medexScraper.SearchAsync(product);
         }
 
         if (result is null)

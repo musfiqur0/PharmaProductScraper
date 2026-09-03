@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using Dapper;
 using Npgsql;
 using PharmaProductScraper.Models;
@@ -9,10 +9,12 @@ namespace PharmaProductScraper.Repositories;
 public sealed class ProductRepository
 {
     private readonly string _connectionString;
+    private readonly string _connectionStringLive;
 
-    public ProductRepository(string connectionString)
+    public ProductRepository(string connectionString, string connectionStringLive)
     {
         _connectionString = connectionString;
+        _connectionStringLive = connectionStringLive;
     }
 
     public async Task<List<Product>> GetProductsAsync(int take)
@@ -22,10 +24,12 @@ public sealed class ProductRepository
                 p.id,
                 p.name,
                 p.generic_name AS GenericName,
-                p.strength
+                p.strength,
+                p.category as Form
             FROM public.product p
             WHERE is_deleted = false
               AND is_active = true
+              AND type = 'PHARMACEUTICAL'
               --AND (
               --      monograph IS NULL
               --      OR monograph = '{}'::jsonb
@@ -35,10 +39,9 @@ public sealed class ProductRepository
             LIMIT @Take;
             """;
 
-        await using var connection =
-            new NpgsqlConnection(_connectionString);
+        await using var connectionLive = new NpgsqlConnection(_connectionStringLive);
 
-        var products = await connection.QueryAsync<Product>(
+        var products = await connectionLive.QueryAsync<Product>(
             sql,
             new
             {
@@ -51,170 +54,74 @@ public sealed class ProductRepository
 
 
     public async Task UpdateProductAsync(
-        long productId,
-        ScrapedProduct result)
+    long productId,
+    ScrapedProduct result)
     {
         const string sql = """
-            INSERT INTO public.productupdated
-            (
-                id,
-                --"name",
-                --barcode,
-                generic_name,
-                --"type",
-                --origin,
-                --category,
-                --sub_category,
-                --dose,
-                image_name,
-                url,
-                --image_uploaded_by_user_id,
-                --is_prescription_required,
-                --is_strip_allowed,
-                --medicine_per_strips,
-                --cost_per_unit,
-                --vat,
-                --new_cost_per_unit,
-                rate_per_unit,
-                --is_approved,
-                --is_active,
-                --is_deleted,
-                --deleted_by_crm_user_id,
-                --deleted_by_crm_user_at,
-                --created_by_pharmacy_user_id,
-                --processed_by_crm_user_id,
-                --processed_by_crm_user_at,
-                --created_by_crm_user_id,
-                --created_at,
-                updated_at,
-                --pharmacy_supplier_id,
-                --"size",
-                --tp_per_unit,
-                --vat_per_unit,
-                pack_size,
-                strength,
-                --prescription_note,
-                --product_details,
-                --created_by_supplier_user_id,
-                --discontinued_at,
-                --discontinued_by_supplier_user_id,
-                product_identifier,
-                --therapeutic_medicine_class_type,
-                monograph,
-                is_add_lookup_drug
-            )
-            SELECT
-                p.id,
-                --p."name",
-                --p.barcode,
+        INSERT INTO public.productupdated
+        (
+            id,
+            name,
+            generic_name,
+            "type",
+            category,
+            url,
+            is_prescription_required,
+            medicine_per_strips,
+            rate_per_unit,
+            pack_size,
+            "size",
+            strength,
+            monograph,
+            --is_add_lookup_drug,
+            updated_at
+        )
+        VALUES
+        (
+            @ProductId,
+            NULLIF(@Name, ''),
+            NULLIF(@GenericName, ''),
+            NULLIF(@Type, ''),
+            NULLIF(@Category, ''),
+            NULLIF(@ProductUrl, ''),
+            @IsPrescriptionRequired,
+            @MedicinePerStrips,
+            @Price,
+            @PackSize,
+            NULLIF(@Size, ''),
+            NULLIF(@Strength, ''),
+            CAST(@MonographJson AS jsonb),
+            --true,
+            NOW()
+        )
 
-                COALESCE(
-                    NULLIF(@GenericName, ''),
-                    p.generic_name
-                ),
-
-                --p."type",
-                --p.origin,
-                --p.category,
-                --p.sub_category,
-                --p.dose,
-
-                COALESCE(
-                    NULLIF(@ImageUrl, ''),
-                    p.image_name
-                ),
-
-                COALESCE(
-                    NULLIF(@ProductUrl, ''),
-                    p.url
-                ),
-
-                --p.image_uploaded_by_user_id,
-                --p.is_prescription_required,
-                --p.is_strip_allowed,
-                --p.medicine_per_strips,
-                --p.cost_per_unit,
-                --p.vat,
-                --p.new_cost_per_unit,
-
-                COALESCE(
-                    @Price,
-                    p.rate_per_unit
-                ),
-
-                --p.is_approved,
-                --p.is_active,
-                --p.is_deleted,
-                --p.deleted_by_crm_user_id,
-                --p.deleted_by_crm_user_at,
-                --p.created_by_pharmacy_user_id,
-                --p.processed_by_crm_user_id,
-                --p.processed_by_crm_user_at,
-                --p.created_by_crm_user_id,
-                --p.created_at,
-
-                NOW(),
-
-                --p.pharmacy_supplier_id,
-                --p."size",
-                --p.tp_per_unit,
-                --p.vat_per_unit,
-
-                COALESCE(
-                    @PackSize,
-                    p.pack_size
-                ),
-
-                COALESCE(
-                    NULLIF(@Strength, ''),
-                    p.strength
-                ),
-
-                --p.prescription_note,
-                --p.product_details,
-                --p.created_by_supplier_user_id,
-                --p.discontinued_at,
-                --p.discontinued_by_supplier_user_id,
-
-                COALESCE(
-                    NULLIF(@ExternalId, ''),
-                    p.product_identifier
-                ),
-
-                --p.therapeutic_medicine_class_type,
-
-                CASE
-                    WHEN @MonographJson IS NULL
-                        THEN p.monograph
-                    ELSE CAST(@MonographJson AS jsonb)
-                END,
-
-                true
-
-            FROM public.product p
-            WHERE p.id = @ProductId
-
-            ON CONFLICT (id)
-            DO UPDATE SET
-                generic_name = EXCLUDED.generic_name,
-                strength = EXCLUDED.strength,
-                url = EXCLUDED.url,
-                image_name = EXCLUDED.image_name,
-                rate_per_unit = EXCLUDED.rate_per_unit,
-                pack_size = EXCLUDED.pack_size,
-                product_identifier = EXCLUDED.product_identifier,
-                monograph = EXCLUDED.monograph,
-                is_add_lookup_drug = EXCLUDED.is_add_lookup_drug,
-                updated_at = NOW();
-            """;
+        ON CONFLICT (id)
+        DO UPDATE SET
+            name = EXCLUDED.name,
+            generic_name = EXCLUDED.generic_name,
+            "type" = EXCLUDED."type",
+            category = EXCLUDED.category,
+            url = EXCLUDED.url,
+            is_prescription_required = EXCLUDED.is_prescription_required,
+            medicine_per_strips = EXCLUDED.medicine_per_strips,
+            rate_per_unit = EXCLUDED.rate_per_unit,
+            pack_size = EXCLUDED.pack_size,
+            "size" = EXCLUDED."size",
+            strength = EXCLUDED.strength,
+            monograph = EXCLUDED.monograph,
+            --is_add_lookup_drug = true,
+            updated_at = NOW();
+        """;
 
         var monographJson =
             result.Monograph.Count > 0
-                ? JsonSerializer.Serialize(result.Monograph)
-                : null;
+                ? JsonSerializer.Serialize(
+                    result.Monograph)
+                : "{}";
 
         await using var connection =
-            new NpgsqlConnection(_connectionString);
+            new NpgsqlConnection(
+                _connectionString);
 
         await connection.ExecuteAsync(
             sql,
@@ -222,13 +129,17 @@ public sealed class ProductRepository
             {
                 ProductId = productId,
 
+                result.Name,
                 result.GenericName,
-                result.Strength,
+                result.Type,
+                result.Category,
                 result.ProductUrl,
-                result.ImageUrl,
+                result.IsPrescriptionRequired,
+                result.MedicinePerStrips,
                 result.Price,
                 result.PackSize,
-                result.ExternalId,
+                result.Size,
+                result.Strength,
 
                 MonographJson = monographJson
             });
