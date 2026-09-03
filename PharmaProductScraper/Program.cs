@@ -39,8 +39,8 @@ foreach (var product in products)
 
     try
     {
-        //var result = await aroggaScraper.SearchAsync(product);
-        ScrapedProduct? result = null;
+        ScrapedProduct? result = await aroggaScraper.SearchAsync(product);
+        //ScrapedProduct? result = null;
 
         if (result is null)
         {
