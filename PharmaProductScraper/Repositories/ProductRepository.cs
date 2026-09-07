@@ -76,7 +76,7 @@ public sealed class ProductRepository
             "size",
             strength,
             monograph,
-            --is_add_lookup_drug,
+            is_add_lookup_drug,
             updated_at
         )
         VALUES
@@ -94,7 +94,7 @@ public sealed class ProductRepository
             NULLIF(@Size, ''),
             NULLIF(@Strength, ''),
             CAST(@MonographJson AS jsonb),
-            --true,
+            true,
             NOW()
         )
 
