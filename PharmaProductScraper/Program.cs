@@ -2,24 +2,32 @@ using PharmaProductScraper.Models;
 using PharmaProductScraper.Repositories;
 using PharmaProductScraper.Scrapers;
 
-var connectionString = "Host=localhost;Port=5432;Database=dg_pharma;Username=postgres;Password=postgrespass123;";
-var connectionStringLive= "Host=localhost;Port=5432;Database=dg_pharma;Username=postgres;Password=postgrespass123;";
 
-var delayMilliseconds = 1500;
-var take = 100;
+static HttpClient CreateDefaultHttpClient()
+{
+    var client = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+    client.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36");
+    client.DefaultRequestHeaders.Accept.ParseAdd("text/html,application/json");
+    return client;
+}
+
+
+var connectionString = "Host=localhost;Port=5432;Database=dg_pharma;Username=postgres;Password=postgrespass123;";
+var connectionStringLive = "Host=localhost;Port=5432;Database=dg_pharma;Username=postgres;Password=postgrespass123;";
+
+var take = 1000;
 
 var repository = new ProductRepository(connectionString, connectionStringLive);
 
-using var httpClient = new HttpClient
-{
-    Timeout = TimeSpan.FromSeconds(30)
-};
+HttpClient? proxyHttpClient = null;
+proxyHttpClient = await ProxyHelper.CreateWorkingHttpClientAsync();
+using var httpClient = proxyHttpClient ?? CreateDefaultHttpClient();
 
-httpClient.DefaultRequestHeaders.UserAgent.ParseAdd(
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
-    "AppleWebKit/537.36 Chrome/124.0 Safari/537.36");
+Console.WriteLine(proxyHttpClient is null ? "No working proxy found. Using direct connection." : "Using proxy connection.");
 
-httpClient.DefaultRequestHeaders.Accept.ParseAdd("text/html,application/json");
+// ======================================================
+// SCRAPERS
+// ======================================================
 
 var medexScraper = new MedexScraper(httpClient);
 var aroggaScraper = new AroggaScraper(httpClient);
@@ -31,31 +39,58 @@ Console.WriteLine($"Products to process: {products.Count}");
 var success = 0;
 var notFound = 0;
 var failed = 0;
+var scraperAttempt = 0;
+
+// ======================================================
+// EXISTING SCRAPER FLOW
+// ======================================================
 
 foreach (var product in products)
 {
+    scraperAttempt++;
     Console.WriteLine();
-    Console.WriteLine($"[{product.Id}] {product.Name}");
+    Console.WriteLine("===================================");
+    Console.WriteLine($"Iteration {scraperAttempt}/{products.Count} | Product ID: {product.Id} | {product.Name}");
 
     try
     {
-        ScrapedProduct? result = await aroggaScraper.SearchAsync(product);
-        //ScrapedProduct? result = null;
+        ScrapedProduct? result;
 
-        if (result is null)
+        if (scraperAttempt % 4 == 0)
         {
-            Console.WriteLine("Arogga: Not found. Trying MedEx...");
+            Console.WriteLine("Trying MedEx first...");
             result = await medexScraper.SearchAsync(product);
+
+            if (result is null)
+            {
+                Console.WriteLine("MedEx: Not found. Trying Arogga...");
+                result = await aroggaScraper.SearchAsync(product);
+            }
+        }
+        else
+        {
+            Console.WriteLine("Trying Arogga first...");
+            result = await aroggaScraper.SearchAsync(product);
+
+            if (result is null)
+            {
+                Console.WriteLine("Arogga: Not found. Trying MedEx...");
+                result = await medexScraper.SearchAsync(product);
+            }
         }
 
         if (result is null)
         {
+            await repository.InsertNotFoundProductAsync(product.Id);
+
             Console.ForegroundColor = ConsoleColor.Yellow;
             Console.WriteLine("No match found.");
             Console.ResetColor();
 
             notFound++;
 
+            var delayMilliseconds = Random.Shared.Next(2000, 10001);
+            Console.WriteLine($"Waiting {delayMilliseconds / 1000.0:F1} seconds...");
             await Task.Delay(delayMilliseconds);
 
             continue;
@@ -67,9 +102,7 @@ foreach (var product in products)
         Console.WriteLine($"Strength : {result.Strength}");
         Console.WriteLine($"URL      : {result.ProductUrl}");
 
-        await repository.UpdateProductAsync(
-            product.Id,
-            result);
+        await repository.UpdateProductAsync(product.Id, result);
 
         success++;
 
@@ -86,8 +119,14 @@ foreach (var product in products)
         Console.ResetColor();
     }
 
-    await Task.Delay(delayMilliseconds);
+    var delayMilliseconds2 = Random.Shared.Next(2000, 10001);
+    Console.WriteLine($"Waiting {delayMilliseconds2 / 1000.0:F1} seconds...");
+    await Task.Delay(delayMilliseconds2);
 }
+
+// ======================================================
+// SUMMARY
+// ======================================================
 
 Console.WriteLine();
 Console.WriteLine("===================================");

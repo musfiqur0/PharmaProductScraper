@@ -27,9 +27,12 @@ public sealed class ProductRepository
                 p.strength,
                 p.category as Form
             FROM public.product p
-            WHERE is_deleted = false
-              AND is_active = true
-              AND type = 'PHARMACEUTICAL'
+            LEFT JOIN public.productupdated pu ON p.id = pu.id
+            WHERE p.is_deleted = false
+              AND p.is_active = true
+              AND p.type = 'PHARMACEUTICAL'
+              AND pu.id IS NULL
+              --AND pu.is_add_lookup_drug = false
               --AND (
               --      monograph IS NULL
               --      OR monograph = '{}'::jsonb
@@ -109,42 +112,61 @@ public sealed class ProductRepository
             "size" = EXCLUDED."size",
             strength = EXCLUDED.strength,
             monograph = EXCLUDED.monograph,
-            --is_add_lookup_drug = true,
+            is_add_lookup_drug = true,  -- true if scraped data found
             updated_at = NOW();
         """;
 
-        var monographJson =
-            result.Monograph.Count > 0
-                ? JsonSerializer.Serialize(
-                    result.Monograph)
-                : "{}";
+        var monographJson = result.Monograph.Count > 0 ? JsonSerializer.Serialize(result.Monograph) : "{}";
 
-        await using var connection =
-            new NpgsqlConnection(
-                _connectionString);
+        await using var connection = new NpgsqlConnection(_connectionString);
 
-        await connection.ExecuteAsync(
-            sql,
-            new
-            {
-                ProductId = productId,
+        await connection.ExecuteAsync(sql, new
+        {
+            ProductId = productId,
 
-                result.Name,
-                result.GenericName,
-                result.Type,
-                result.Category,
-                result.ProductUrl,
-                result.IsPrescriptionRequired,
-                result.MedicinePerStrips,
-                result.Price,
-                result.PackSize,
-                result.Size,
-                result.Strength,
+            result.Name,
+            result.GenericName,
+            result.Type,
+            result.Category,
+            result.ProductUrl,
+            result.IsPrescriptionRequired,
+            result.MedicinePerStrips,
+            result.Price,
+            result.PackSize,
+            result.Size,
+            result.Strength,
 
-                MonographJson = monographJson
-            });
+            MonographJson = monographJson
+        });
     }
 
+
+    public async Task InsertNotFoundProductAsync(long productId)
+    {
+        const string sql = """
+            INSERT INTO public.productupdated
+            (
+                id,
+                is_add_lookup_drug
+            )
+            VALUES
+            (
+                @ProductId,
+                false
+            )
+            ON CONFLICT (id)
+            DO UPDATE SET
+                is_add_lookup_drug = false,
+                updated_at = NOW();
+            """;
+
+        await using var connection = new NpgsqlConnection(_connectionString);
+
+        await connection.ExecuteAsync(sql, new
+        {
+            ProductId = productId
+        });
+    }
 
     //public async Task UpdateProductAsync(
     //    long productId,
