@@ -56,27 +56,36 @@ foreach (var product in products)
     {
         ScrapedProduct? result;
 
-        if (scraperAttempt % 4 == 0)
+        //if (scraperAttempt % 4 == 0)
+        //{
+        //    Console.WriteLine("Trying MedEx first...");
+        //    result = await medexScraper.SearchAsync(product);
+
+        //    if (result is null)
+        //    {
+        //        Console.WriteLine("MedEx: Not found. Trying Arogga...");
+        //        result = await aroggaScraper.SearchAsync(product);
+        //    }
+        //}
+        //else
+        //{
+        //    Console.WriteLine("Trying Arogga first...");
+        //    result = await aroggaScraper.SearchAsync(product);
+
+        //    if (result is null)
+        //    {
+        //        Console.WriteLine("Arogga: Not found. Trying MedEx...");
+        //        result = await medexScraper.SearchAsync(product);
+        //    }
+        //}
+
+        Console.WriteLine("Trying Arogga first...");
+        result = await aroggaScraper.SearchAsync(product);
+
+        if (result is null)
         {
-            Console.WriteLine("Trying MedEx first...");
+            Console.WriteLine("Arogga: Not found. Trying MedEx...");
             result = await medexScraper.SearchAsync(product);
-
-            if (result is null)
-            {
-                Console.WriteLine("MedEx: Not found. Trying Arogga...");
-                result = await aroggaScraper.SearchAsync(product);
-            }
-        }
-        else
-        {
-            Console.WriteLine("Trying Arogga first...");
-            result = await aroggaScraper.SearchAsync(product);
-
-            if (result is null)
-            {
-                Console.WriteLine("Arogga: Not found. Trying MedEx...");
-                result = await medexScraper.SearchAsync(product);
-            }
         }
 
         if (result is null)

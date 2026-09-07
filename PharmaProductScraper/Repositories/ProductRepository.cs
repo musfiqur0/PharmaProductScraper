@@ -144,20 +144,9 @@ public sealed class ProductRepository
     public async Task InsertNotFoundProductAsync(long productId)
     {
         const string sql = """
-            INSERT INTO public.productupdated
-            (
-                id,
-                is_add_lookup_drug
-            )
-            VALUES
-            (
-                @ProductId,
-                false
-            )
-            ON CONFLICT (id)
-            DO UPDATE SET
-                is_add_lookup_drug = false,
-                updated_at = NOW();
+            INSERT INTO public.productupdated (id, is_add_lookup_drug)
+            VALUES (@ProductId, false)
+            ON CONFLICT (id) DO NOTHING;
             """;
 
         await using var connection = new NpgsqlConnection(_connectionString);

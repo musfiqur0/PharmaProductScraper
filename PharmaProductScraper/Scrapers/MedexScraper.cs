@@ -34,52 +34,25 @@ public sealed class MedexScraper
         string? genericName = null,
         CancellationToken ct = default)
     {
-        List<ScrapedProduct> matches = new();
+        if (string.IsNullOrWhiteSpace(name))
+            return null;
 
         // 1. Search MedEx only once by product name.
-        if (!string.IsNullOrWhiteSpace(name))
-        {
-            var candidates = await FetchCandidatesAsync(name, ct);
+        var candidates = await FetchCandidatesAsync(name, ct);
 
-            //matches = FindBestMatch(candidates, name, null, null, null);
-            matches = candidates;
-
-            //if (matches.Count == 0)
-            //    return null;
-        }
-        else
-        {
+        if (candidates.Count == 0)
             return null;
-        }
 
-        // 2. Filter same candidate list by strength.
-        if (!string.IsNullOrWhiteSpace(strength))
-        {
-            matches = FindBestMatch(matches, null, strength, null, null);
+        // 2. Score by Name + Strength + Form.
+        // 3. Keep original MedEx ordering when scores are equal.
+        // 4. Starting from highest score, find the first GenericName match.
+        var selectedCandidate = FindBestMatch(candidates, name, strength, form, genericName);
 
-            if (matches.Count == 0)
-                return null;
-        }
+        if (selectedCandidate is null || string.IsNullOrWhiteSpace(selectedCandidate.ProductUrl))
+            return null;
 
-        // 3. Filter same candidate list by form.
-        if (!string.IsNullOrWhiteSpace(form))
-        {
-            matches = FindBestMatch(matches, null, null, form, null);
-
-            if (matches.Count == 0)
-                return null;
-        }
-
-        // 4. Filter same candidate list by generic name.
-        if (!string.IsNullOrWhiteSpace(genericName))
-        {
-            matches = FindBestMatch(matches, null, null, null, genericName);
-
-            if (matches.Count == 0)
-                return null;
-        }
-
-        return matches.FirstOrDefault();
+        // Fetch only the selected product detail page.
+        return await GetDetailsAsync(selectedCandidate.ProductUrl, selectedCandidate.GenericName, ct);
     }
 
     private async Task<List<ScrapedProduct>> FetchCandidatesAsync(
@@ -88,57 +61,50 @@ public sealed class MedexScraper
     {
         try
         {
-            var url =
-                $"{SearchUrl}?search={Uri.EscapeDataString(query)}";
-
+            var url = $"{SearchUrl}?search={Uri.EscapeDataString(query)}";
             var html = await _httpClient.GetStringAsync(url, ct);
-
             var document = new HtmlDocument();
-
             document.LoadHtml(html);
-
             var nodes = document.DocumentNode.SelectNodes("//a[contains(@href,'/brands/')]");
 
             if (nodes is null)
                 return new List<ScrapedProduct>();
 
             var candidates = new List<ScrapedProduct>();
-
             var processedUrls = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             foreach (var node in nodes)
             {
                 var productName = WebUtility.HtmlDecode(node.InnerText).Trim();
-
                 var productUrl = node.GetAttributeValue("href", string.Empty);
 
                 if (string.IsNullOrWhiteSpace(productName) || string.IsNullOrWhiteSpace(productUrl))
-                {
                     continue;
-                }
 
                 if (!productUrl.StartsWith("http", StringComparison.OrdinalIgnoreCase))
-                {
                     productUrl = BaseUrl + productUrl;
-                }
 
                 // MedEx sometimes has duplicate brand anchors.
                 if (!processedUrls.Add(productUrl))
                     continue;
 
-                var genericName = TryGetGenericFromSearchNode(node);
+                var candidate = new ScrapedProduct
+                {
+                    Source = "MedEx",
+                    Name = productName,
+                    GenericName = TryGetGenericFromSearchNode(node),
+                    ProductUrl = productUrl,
+                    ExternalId = GetBrandId(productUrl)
+                };
 
-                var candidate = await GetDetailsAsync(productUrl, genericName, ct);
-
-                if (candidate is null)
-                    continue;
-
-                // Search page name is usually cleaner than title-derived name.
-                if (string.IsNullOrWhiteSpace(candidate.Name))
-                    candidate.Name = productName;
-
-                if (string.IsNullOrWhiteSpace(candidate.GenericName))
-                    candidate.GenericName = genericName;
+                // Example:
+                // Napa 500 mg (Suppository)
+                //
+                // becomes:
+                // Name     = Napa
+                // Strength = 500 mg
+                // Type     = Suppository
+                ParseSearchResultName(candidate);
 
                 candidates.Add(candidate);
             }
@@ -156,14 +122,10 @@ public sealed class MedexScraper
         try
         {
             if (!url.StartsWith("http", StringComparison.OrdinalIgnoreCase))
-            {
                 url = BaseUrl + url;
-            }
 
             var html = await _httpClient.GetStringAsync(url, ct);
-
             var document = new HtmlDocument();
-
             document.LoadHtml(html);
 
             var result = new ScrapedProduct
@@ -188,77 +150,110 @@ public sealed class MedexScraper
         }
     }
 
-    private static List<ScrapedProduct> FindBestMatch(
+    private static ScrapedProduct? FindBestMatch(
         List<ScrapedProduct> candidates,
         string? targetName,
         string? targetStrength,
         string? targetForm,
-        string? targetGenericName,
-        int score = 0)
+        string? targetGenericName)
     {
         if (candidates.Count == 0)
-            return new List<ScrapedProduct>();
+            return null;
 
-        var scoredList = candidates
-            .Select(candidate => new
+        var scoredCandidates = candidates
+            .Select((candidate, index) => new
             {
                 Product = candidate,
-                Score = CalculateScore(candidate, targetName, targetStrength, targetForm, targetGenericName, score)
+                OriginalIndex = index,
+                Score = GetMatchScore(targetName, candidate.Name) +
+                        GetMatchScore(targetStrength, candidate.Strength) +
+                        GetMatchScore(targetForm, candidate.Type)
             })
-            .Where(x => x.Score > 0)
+            .Where(x => x.Score > 1)
             .OrderByDescending(x => x.Score)
+            .ThenBy(x => x.OriginalIndex)
             .ToList();
 
-        return scoredList
-            .Select(x => x.Product)
+        if (scoredCandidates.Count == 0)
+            return null;
+
+        var maxScore = scoredCandidates[0].Score;
+
+        var maxScoredCandidates = scoredCandidates
+            .Where(x => x.Score == maxScore)
             .ToList();
-    }
-
-    private static int CalculateScore(
-        ScrapedProduct candidate,
-        string? targetName,
-        string? targetStrength,
-        string? targetForm,
-        string? targetGenericName,
-        int score = 0)
-    {
-        if (!string.IsNullOrWhiteSpace(targetName))
-            score += GetMatchScore(targetName, candidate.Name);
-
-        if (!string.IsNullOrWhiteSpace(targetStrength))
-            score += GetMatchScore(targetStrength, candidate.Strength);
-
-        if (!string.IsNullOrWhiteSpace(targetForm))
-            score += GetMatchScore(targetForm, candidate.Type);
 
         if (!string.IsNullOrWhiteSpace(targetGenericName))
-            score += GetMatchScore(targetGenericName, candidate.GenericName);
+        {
+            //foreach (var candidate in scoredCandidates)
+            foreach (var candidate in maxScoredCandidates)
+            {
+                if (GetMatchScore(targetGenericName, candidate.Product.GenericName) > 0)
+                    return candidate.Product;
+            }
 
-        return score;
+            return null;
+        }
+
+        return maxScoredCandidates.First().Product;
     }
 
-    private static void ParseTitle(
-    HtmlDocument document,
-    ScrapedProduct result)
+    private static void ParseSearchResultName(ScrapedProduct candidate)
     {
-        var title = document.DocumentNode
-            .SelectSingleNode("//title")
-            ?.InnerText;
+        if (string.IsNullOrWhiteSpace(candidate.Name))
+            return;
+
+        var value = candidate.Name.Trim();
+
+        // Example:
+        // Napa 500 mg (Suppository)
+        //
+        // Extract:
+        // Type = Suppository
+        var formMatch = Regex.Match(value, @"\(([^)]+)\)\s*$");
+
+        if (formMatch.Success)
+        {
+            candidate.Type = formMatch.Groups[1].Value.Trim();
+            candidate.Category = candidate.Type;
+            value = value.Substring(0, formMatch.Index).Trim();
+        }
+
+        // Examples:
+        // Napa 500 mg
+        // Napa Extra 500 mg+65 mg
+        // Napa Extend 665 mg
+        //
+        // Extract strength from the end.
+        var strengthMatch = Regex.Match(
+            value,
+            @"(\d+(?:\.\d+)?\s*(?:mg|mcg|g|kg|ml|l|iu|unit|units|%)(?:\s*\+\s*\d+(?:\.\d+)?\s*(?:mg|mcg|g|kg|ml|l|iu|unit|units|%))*)\s*$",
+            RegexOptions.IgnoreCase);
+
+        if (strengthMatch.Success)
+        {
+            candidate.Strength = strengthMatch.Groups[1].Value.Trim();
+            candidate.Name = value.Substring(0, strengthMatch.Index).Trim();
+        }
+        else
+        {
+            candidate.Name = value;
+        }
+    }
+
+    private static void ParseTitle(HtmlDocument document, ScrapedProduct result)
+    {
+        var title = document.DocumentNode.SelectSingleNode("//title")?.InnerText;
 
         if (string.IsNullOrWhiteSpace(title))
             return;
 
         title = WebUtility.HtmlDecode(title);
 
-        var parts = title.Split(
-            '|',
-            StringSplitOptions.TrimEntries |
-            StringSplitOptions.RemoveEmptyEntries);
+        var parts = title.Split('|', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
 
-        // MedEx title typically:
-        //
-        // Napa | 500 mg | Tablet | নাপা |
-        // Beximco Pharmaceuticals Ltd. | ...
+        // MedEx title normally:
+        // Napa | 500 mg | Tablet | নাপা | Beximco Pharmaceuticals Ltd. | ...
 
         if (parts.Length > 0)
             result.Name = parts[0];
@@ -329,10 +324,7 @@ public sealed class MedexScraper
         var match = Regex.Match(text, @"Unit Price\s*:\s*৳\s*([\d,.]+)", RegexOptions.IgnoreCase);
 
         if (!match.Success)
-        {
-            // Fallback to Strip Price.
-            match = Regex.Match(text, @"Strip Price\s*:\s*৳\s*([\d,.]+)", RegexOptions.IgnoreCase);
-        }
+            match = Regex.Match(text, @"Strip Price\s*:\s*৳\s*([\d,.]+)", RegexOptions.IgnoreCase);  // Fallback to Strip Price.
 
         if (!match.Success)
             return;
@@ -340,32 +332,20 @@ public sealed class MedexScraper
         var value = match.Groups[1].Value.Replace(",", string.Empty);
 
         if (double.TryParse(value, out var price))
-        {
             result.Price = price;
-        }
     }
 
-    private static void ParsePackSize(
-        HtmlDocument document,
-        ScrapedProduct result)
+    private static void ParsePackSize(HtmlDocument document, ScrapedProduct result)
     {
-        var node = document.DocumentNode
-            .SelectSingleNode("//*[contains(@class,'pack-size-info')]");
+        var node = document.DocumentNode.SelectSingleNode("//*[contains(@class,'pack-size-info')]");
 
         if (node is null)
             return;
 
         var text = WebUtility.HtmlDecode(node.InnerText);
+        text = Regex.Replace(text, @"\s+", " ").Trim();
 
-        text = Regex.Replace(
-            text,
-            @"\s+",
-            " ").Trim();
-
-        var match = Regex.Match(
-            text,
-            @"(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)",
-            RegexOptions.IgnoreCase);
+        var match = Regex.Match(text, @"(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)", RegexOptions.IgnoreCase);
 
         if (!match.Success)
             return;
@@ -373,11 +353,8 @@ public sealed class MedexScraper
         var firstValue = match.Groups[1].Value.Replace(",", string.Empty);
         var secondValue = match.Groups[2].Value.Replace(",", string.Empty);
 
-        if (!int.TryParse(firstValue, out var stripCount) ||
-            !int.TryParse(secondValue, out var unitsPerStrip))
-        {
+        if (!int.TryParse(firstValue, out var stripCount) || !int.TryParse(secondValue, out var unitsPerStrip))
             return;
-        }
 
         result.PackSize = unitsPerStrip;
         result.MedicinePerStrips = unitsPerStrip;
@@ -427,9 +404,9 @@ public sealed class MedexScraper
         return match.Success ? match.Groups[1].Value : null;
     }
 
-    private static int GetMatchScore(string search, string? result)
+    private static int GetMatchScore(string? search, string? result)
     {
-        if (string.IsNullOrWhiteSpace(result) || string.IsNullOrWhiteSpace(search))
+        if (string.IsNullOrWhiteSpace(search) || string.IsNullOrWhiteSpace(result))
             return 0;
 
         var a = Normalize(search);
