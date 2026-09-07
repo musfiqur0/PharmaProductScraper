@@ -19,20 +19,10 @@ public sealed class MedexScraper
 
     public async Task<ScrapedProduct?> SearchAsync(Product product, CancellationToken ct = default)
     {
-        return await SearchAsync(
-            product.Name,
-            product.Strength,
-            product.Form ?? product.Type,
-            product.GenericName,
-            ct);
+        return await SearchAsync(product.Name, product.Strength, product.Form ?? product.Type, product.GenericName, ct);
     }
 
-    public async Task<ScrapedProduct?> SearchAsync(
-        string? name,
-        string? strength = null,
-        string? form = null,
-        string? genericName = null,
-        CancellationToken ct = default)
+    public async Task<ScrapedProduct?> SearchAsync(string? name, string? strength = null, string? form = null, string? genericName = null, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(name))
             return null;
@@ -55,18 +45,31 @@ public sealed class MedexScraper
         return await GetDetailsAsync(selectedCandidate.ProductUrl, selectedCandidate.GenericName, ct);
     }
 
-    private async Task<List<ScrapedProduct>> FetchCandidatesAsync(
-        string query,
-        CancellationToken ct)
+    private async Task<List<ScrapedProduct>> FetchCandidatesAsync(string query, CancellationToken ct)
     {
         try
         {
             var url = $"{SearchUrl}?search={Uri.EscapeDataString(query)}";
-            var html = await _httpClient.GetStringAsync(url, ct);
+
+            using var response = await _httpClient.GetAsync(url, ct);
+            var html = await response.Content.ReadAsStringAsync(ct);
+
+            if (IsSecurityChallenge(html))
+            {
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine($"MedEx blocked: Security Check detected. HTTP {(int)response.StatusCode}");
+                Console.ResetColor();
+
+                return new List<ScrapedProduct>();
+            }
+
+            if (!response.IsSuccessStatusCode)
+                return new List<ScrapedProduct>();
+
             var document = new HtmlDocument();
             document.LoadHtml(html);
-            var nodes = document.DocumentNode.SelectNodes("//a[contains(@href,'/brands/')]");
 
+            var nodes = document.DocumentNode.SelectNodes("//a[contains(@href,'/brands/')]");
             if (nodes is null)
                 return new List<ScrapedProduct>();
 
@@ -124,7 +127,21 @@ public sealed class MedexScraper
             if (!url.StartsWith("http", StringComparison.OrdinalIgnoreCase))
                 url = BaseUrl + url;
 
-            var html = await _httpClient.GetStringAsync(url, ct);
+            using var response = await _httpClient.GetAsync(url, ct);
+            var html = await response.Content.ReadAsStringAsync(ct);
+
+            if (IsSecurityChallenge(html))
+            {
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine($"MedEx blocked: Security Check detected. HTTP {(int)response.StatusCode}");
+                Console.ResetColor();
+
+                return null;
+            }
+
+            if (!response.IsSuccessStatusCode)
+                return null;
+
             var document = new HtmlDocument();
             document.LoadHtml(html);
 
@@ -274,8 +291,7 @@ public sealed class MedexScraper
             result.Manufacturer = parts[4];
     }
 
-    private static string? TryGetGenericFromSearchNode(
-        HtmlNode brandNode)
+    private static string? TryGetGenericFromSearchNode(HtmlNode brandNode)
     {
         try
         {
@@ -439,5 +455,17 @@ public sealed class MedexScraper
         value = Regex.Replace(value, @"(\d+(?:\.\d+)?)\s*[/\-_]?\s*(mg|mcg|g|kg|ml|l|iu|unit|units|%)\b", "$1$2");
 
         return value;
+    }
+
+    private static bool IsSecurityChallenge(string html)
+    {
+        if (string.IsNullOrWhiteSpace(html))
+            return false;
+
+        return html.Contains("Security Check", StringComparison.OrdinalIgnoreCase) ||
+               html.Contains("Just a moment", StringComparison.OrdinalIgnoreCase) ||
+               html.Contains("cf-chl-", StringComparison.OrdinalIgnoreCase) ||
+               html.Contains("challenge-platform", StringComparison.OrdinalIgnoreCase) ||
+               html.Contains("cf-turnstile", StringComparison.OrdinalIgnoreCase);
     }
 }
